@@ -1,12 +1,10 @@
-"""Fast micro-GPT — optimised for ≤10 min CPU training @ 2000 steps.
+"""Micro-GPT — full feature stack.
 
-Architecture (~1,863,680 params):
-  • BPE vocab 2048, d_model=160, 6 layers (straight stack, no recurrence)
+Architecture (~1,660,352 params):
+  • BPE vocab 2048, d_model=160
+  • 4 physical blocks → 6 effective layers via depth recurrence [0, 1, 2, 3, 2, 3]
   • Weight-tied embeddings, ALiBi (0 positional params), Pre-RMSNorm
-  • GeLU MLP with 3× expansion (cheaper per step than SwiGLU)
-
-Dropped vs prior antigravity (speed > marginal BPB):
-  depth recurrence, value residuals, SwiGLU.
+  • SwiGLU MLP (3× expansion), ResFormer value residuals
 """
 import torch
 import torch.nn as nn
@@ -22,7 +20,7 @@ class Config:
     mlp_ratio    = 3
     dropout      = 0.0
     tie_weights  = True
-    recurrence   = [0, 1, 2, 3, 2, 3]
+    recurrence   = [0, 1, 2, 3, 2, 3]   # 6 effective passes through 4 physical blocks
 
 
 class RMSNorm(nn.Module):
@@ -52,36 +50,47 @@ def build_alibi_mask(block_size: int, n_heads: int) -> torch.Tensor:
 class SelfAttention(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
-        self.n_head = cfg.n_head
+        self.n_head   = cfg.n_head
         self.head_dim = cfg.n_embd // cfg.n_head
-        self.qkv = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=False)
+        self.qkv  = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=False)
         self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=False)
+        # ResFormer value residual gates (one scalar per head)
+        self.lam_v1 = nn.Parameter(torch.zeros(cfg.n_head, 1, 1))
+        self.lam_v2 = nn.Parameter(torch.ones(cfg.n_head, 1, 1))
 
-    def forward(self, x: torch.Tensor, alibi: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, alibi: torch.Tensor, v1=None):
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=alibi[:, :, :T, :T])
+        # Blend early-layer values with current-layer values (ResFormer)
+        if v1 is None:
+            v1 = v
+        v_mix = self.lam_v1 * v1 + self.lam_v2 * v
+        y = F.scaled_dot_product_attention(q, k, v_mix, attn_mask=alibi[:, :, :T, :T])
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.proj(y)
+        return self.proj(y), v1
 
 
 class Block(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
         inner = cfg.mlp_ratio * cfg.n_embd
-        self.ln1 = RMSNorm(cfg.n_embd)
-        self.attn = SelfAttention(cfg)
-        self.ln2 = RMSNorm(cfg.n_embd)
-        self.fc1 = nn.Linear(cfg.n_embd, inner, bias=False)
-        self.fc2 = nn.Linear(inner, cfg.n_embd, bias=False)
+        self.ln1     = RMSNorm(cfg.n_embd)
+        self.attn    = SelfAttention(cfg)
+        self.ln2     = RMSNorm(cfg.n_embd)
+        # SwiGLU: gate branch (silu) × up branch → down projection
+        self.fc_gate = nn.Linear(cfg.n_embd, inner, bias=False)
+        self.fc_up   = nn.Linear(cfg.n_embd, inner, bias=False)
+        self.fc_down = nn.Linear(inner, cfg.n_embd, bias=False)
 
-    def forward(self, x: torch.Tensor, alibi: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x), alibi)
-        x = x + self.fc2(F.gelu(self.fc1(self.ln2(x))))
-        return x
+    def forward(self, x: torch.Tensor, alibi: torch.Tensor, v1=None):
+        attn_out, v1 = self.attn(self.ln1(x), alibi, v1)
+        x = x + attn_out
+        h = self.ln2(x)
+        x = x + self.fc_down(F.silu(self.fc_gate(h)) * self.fc_up(h))
+        return x, v1
 
 
 class GPT(nn.Module):
@@ -89,9 +98,9 @@ class GPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
-        self.ln_f = RMSNorm(cfg.n_embd)
-        self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
+        self.blocks  = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
+        self.ln_f    = RMSNorm(cfg.n_embd)
+        self.head    = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         if cfg.tie_weights:
             self.head.weight = self.tok_emb.weight
         self.register_buffer(
@@ -110,9 +119,11 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-        x = self.tok_emb(idx)
-        for block in self.blocks:
-            x = block(x, self.alibi_mask)
+        x  = self.tok_emb(idx)
+        v1 = None
+        # Depth recurrence: traverse physical blocks in the order given by cfg.recurrence
+        for block_idx in self.cfg.recurrence:
+            x, v1 = self.blocks[block_idx](x, self.alibi_mask, v1)
         logits = self.head(self.ln_f(x))
         loss = None
         if targets is not None:

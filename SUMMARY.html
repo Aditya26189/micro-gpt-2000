@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Antigravity LLM — Submission Summary</title>
+<title>Micro-GPT — Submission Summary</title>
 <style>
   :root {
     --bg: #0f1117;
@@ -125,16 +125,16 @@
 </head>
 <body>
 
-<h1>Antigravity Micro-GPT</h1>
+<h1>Micro-GPT 2000</h1>
 <p class="subtitle">2,000-Step LLM Speedrun &mdash; Submission Summary</p>
 
 <div class="metric-grid">
   <div class="metric">
-    <div class="value" id="bpb-value">2.1489</div>
+    <div class="value" id="bpb-value">2.0231</div>
     <div class="label">Dev BPB (lower = better)</div>
   </div>
   <div class="metric">
-    <div class="value">1,353,120</div>
+    <div class="value">1,660,352</div>
     <div class="label">Parameters (&le; 2,000,000)</div>
   </div>
   <div class="metric">
@@ -154,7 +154,7 @@
     &darr;
 <span class="highlight">Token Embedding</span> &mdash; nn.Embedding(2048, 160)  <span class="dim">// no positional embedding (ALiBi)</span>
     &darr;
-<span class="highlight">Depth-Recurrent Blocks</span> [0, 1, 2, 3, 2, 3, 4] &mdash; 5 physical &rarr; 7 effective layers
+<span class="highlight">Depth-Recurrent Blocks</span> [0, 1, 2, 3, 2, 3] &mdash; 4 physical &rarr; 6 effective layers
     &boxur; Each block:
     &boxv;   <span class="highlight">RMSNorm</span> &rarr; <span class="highlight">SelfAttention</span> (4 heads, ALiBi bias, Value Residuals) &rarr; residual add
     &boxv;   <span class="highlight">RMSNorm</span> &rarr; <span class="highlight">SwiGLU MLP</span> (E=3, dim 160&rarr;480&rarr;160, bias=False) &rarr; residual add
@@ -185,8 +185,8 @@
 </div>
 
 <div class="card">
-<h3>4. Depth Recurrence [0,1,2,3,2,3,4] <span class="tag tag-green">Free Depth</span></h3>
-<p>5 physical transformer blocks are traversed in a 7-step recurrence pattern, revisiting blocks 2 and 3 twice. This doubles their training signal and gives the model 7 effective layers of depth at zero additional parameter cost.</p>
+<h3>4. Depth Recurrence [0,1,2,3,2,3] <span class="tag tag-green">Free Depth</span></h3>
+<p>4 physical transformer blocks are traversed in a 6-step recurrence pattern, revisiting blocks 2 and 3 twice. This doubles their training signal and gives the model 6 effective layers of depth at zero additional parameter cost.</p>
 </div>
 
 <div class="card">
@@ -204,17 +204,17 @@
 <table>
   <tr><th>Hyperparameter</th><th>Value</th><th>Rationale</th></tr>
   <tr><td>Optimizer</td><td>AdamW</td><td>Standard for transformers</td></tr>
-  <tr><td>Learning Rate</td><td>1e-3 (peak)</td><td>Aggressive but stable with gradient clipping</td></tr>
+  <tr><td>Learning Rate</td><td>6e-4 (peak)</td><td>Aggressive but stable with gradient clipping</td></tr>
   <tr><td>Betas</td><td>(0.9, 0.95)</td><td>Lower &beta;&#8322; for more responsive second-moment</td></tr>
-  <tr><td>Weight Decay</td><td>0.01</td><td>Mild regularization</td></tr>
+  <tr><td>Weight Decay</td><td>0.02</td><td>Scaled to dataset coverage via epoch_ratio=0.53</td></tr>
   <tr><td>LR Schedule</td><td>WSD (Warmup-Stable-Decay)</td><td>Best practice for small LLMs (TinyLLaMA, SmolLM)</td></tr>
-  <tr><td>Warmup Steps</td><td>150</td><td>7.5% of total steps</td></tr>
+  <tr><td>Warmup Steps</td><td>50</td><td>2.5% of total steps for fast stabilization</td></tr>
   <tr><td>Decay Start</td><td>Step 1600</td><td>80% of training at peak LR</td></tr>
   <tr><td>LR Floor</td><td>1e-5</td><td>Don&rsquo;t waste final steps at zero LR</td></tr>
   <tr><td>Gradient Clipping</td><td>max_norm = 1.0</td><td>Prevents loss spikes</td></tr>
   <tr><td>EMA Decay</td><td>0.997 (steps 1600+)</td><td>Structural regularizer during LR decay</td></tr>
-  <tr><td>Batch Size</td><td>16</td><td>Balance between gradient quality and speed</td></tr>
-  <tr><td>Block Size</td><td>256</td><td>~642 bytes of context per window with BPE</td></tr>
+  <tr><td>Batch Size</td><td>8</td><td>Optimal balance for CPU memory and gradient quality</td></tr>
+  <tr><td>Block Size</td><td>96</td><td>~241 bytes of context per window with BPE</td></tr>
   <tr><td>Init Std</td><td>0.02</td><td>Standard for this model scale</td></tr>
 </table>
 
@@ -222,13 +222,13 @@
 
 <table>
   <tr><th>Component</th><th>Parameters</th><th>% of Total</th></tr>
-  <tr><td>Token Embedding (shared with output head)</td><td>327,680</td><td>16.4%</td></tr>
-  <tr><td>Attention QKV projections (5 blocks)</td><td>384,000</td><td>19.3%</td></tr>
-  <tr><td>Attention output projections (5 blocks)</td><td>128,000</td><td>6.4%</td></tr>
-  <tr><td>SwiGLU MLP w1+w2+w3 (5 blocks)</td><td>1,152,000</td><td>57.8%</td></tr>
-  <tr><td>RMSNorm weights (11 total)</td><td>1,760</td><td>0.1%</td></tr>
-  <tr><td>Value Residual scalars (10 total)</td><td>10</td><td>&lt;0.01%</td></tr>
-  <tr><td><strong>Total</strong></td><td><strong>1,993,450</strong></td><td><strong>99.7% utilized</strong></td></tr>
+  <tr><td>Token Embedding (shared with output head)</td><td>327,680</td><td>19.7%</td></tr>
+  <tr><td>Attention QKV projections (4 blocks)</td><td>307,200</td><td>18.5%</td></tr>
+  <tr><td>Attention output projections (4 blocks)</td><td>102,400</td><td>6.2%</td></tr>
+  <tr><td>SwiGLU MLP w1+w2+w3 (4 blocks)</td><td>921,600</td><td>55.5%</td></tr>
+  <tr><td>RMSNorm weights (9 total)</td><td>1,440</td><td>0.1%</td></tr>
+  <tr><td>Value Residual scalars (8 total)</td><td>32</td><td>&lt;0.01%</td></tr>
+  <tr><td><strong>Total</strong></td><td><strong>1,660,352</strong></td><td><strong>100.0% accounted</strong></td></tr>
 </table>
 
 <h2>Data Audit Results</h2>
@@ -287,13 +287,13 @@
   <tr><th>Run</th><th>Change</th><th>Key Outcome</th></tr>
   <tr><td>0</td><td>Starter Baseline</td><td>Reference point: ByteTokenizer V=256, block_size=128, ~1.3M params</td></tr>
   <tr><td>1</td><td>BPE Tokenizer V=2048</td><td>2.51 bytes/token compression, 5&times; effective context</td></tr>
-  <tr><td>2</td><td>Full architecture overhaul</td><td>ALiBi + RMSNorm + SwiGLU + Weight Tying + Depth Recurrence + Value Residuals = 1,993,450 params</td></tr>
+  <tr><td>2</td><td>Full architecture overhaul</td><td>ALiBi + RMSNorm + SwiGLU + Weight Tying + Depth Recurrence + Value Residuals = 1,660,352 params</td></tr>
   <tr><td>3</td><td>Training loop improvements</td><td>WSD schedule + EMA + AdamW(0.9, 0.95) + grad clip</td></tr>
-  <tr><td>4</td><td>Final production run</td><td>2000 steps, block_size=256, batch=16</td></tr>
+  <tr><td>4</td><td>Final production run</td><td>2000 steps, block_size=96, batch=8, 7.2 min runtime</td></tr>
 </table>
 
 <div class="footer">
-  <p>Antigravity LLM &bull; 2,000-Step Speedrun &bull; Pure PyTorch &bull; CPU Only</p>
+  <p>Micro-GPT &bull; 2,000-Step Speedrun &bull; Pure PyTorch &bull; CPU Only</p>
 </div>
 
 </body>

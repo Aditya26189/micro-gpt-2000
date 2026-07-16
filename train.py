@@ -1,14 +1,15 @@
-"""Fast trainer — target ≤10 min for 2000 steps on laptop CPU.
+"""Micro-GPT trainer — full feature stack.
 
-Speed choices:
-  • Corpus token cache (train_ids.pt) — skips ~60–90 s re-encode each run
-  • 6-layer GeLU stack (no recurrence / SwiGLU / EMA)
-  • block_size=256, batch=32 defaults
-  • Cosine LR schedule (cheaper than WSD bookkeeping, same class of fix)
+  • WSD (Warmup-Stable-Decay) learning rate schedule
+  • AdamW with epoch-ratio-based weight decay
+  • EMA weight averaging during the final decay phase
+  • Token cache (train_ids.pt) to skip re-encoding
+  • Gradient norm clipping (max_norm=1.0)
 
     python train.py --data ../data/train_corpus.txt --steps 2000 --out ckpt.pt
 """
 import argparse
+import copy
 import math
 import os
 import time
@@ -19,25 +20,31 @@ from model import GPT, Config
 import tokenizer as tokenizer_mod
 from tokenizer import BPETokenizer
 
-MAX_STEPS = 2000
+MAX_STEPS  = 2000
 MAX_PARAMS = 2_000_000
 
 
 def get_batch(ids, block, batch, device):
     ix = torch.randint(len(ids) - block - 1, (batch,))
-    x = torch.stack([ids[i : i + block] for i in ix])
+    x = torch.stack([ids[i : i + block]     for i in ix])
     y = torch.stack([ids[i + 1 : i + 1 + block] for i in ix])
     return x.to(device), y.to(device)
 
 
-def cosine_lr(step, total, warmup, peak, floor_ratio=0.1):
+def wsd_lr(step, total, warmup, stable_end, peak):
+    """Warmup → Stable → Linear Decay schedule."""
     if step <= 0:
         return 0.0
     if step < warmup:
+        # Linear warmup
         return peak * step / warmup
-    progress = (step - warmup) / max(1, total - warmup)
-    floor = peak * floor_ratio
-    return floor + 0.5 * (peak - floor) * (1.0 + math.cos(math.pi * progress))
+    if step < stable_end:
+        # Stable phase at peak LR
+        return peak
+    # Linear decay from peak → 1e-5
+    floor = 1e-5
+    progress = (step - stable_end) / max(1, total - stable_end)
+    return peak - (peak - floor) * progress
 
 
 def weight_decay_from_epoch_ratio(ratio: float) -> float:
@@ -63,14 +70,15 @@ def load_corpus_ids(text: str, tok, cache_path: str) -> torch.Tensor:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--steps", type=int, default=2000)
-    ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--lr", type=float, default=6e-4)
-    ap.add_argument("--warmup", type=int, default=50)
-    ap.add_argument("--seed", type=int, default=1337)
-    ap.add_argument("--out", default="ckpt.pt")
-    ap.add_argument("--log_every", type=int, default=100)
+    ap.add_argument("--data",     required=True)
+    ap.add_argument("--steps",    type=int,   default=2000)
+    ap.add_argument("--batch",    type=int,   default=8)
+    ap.add_argument("--lr",       type=float, default=6e-4)
+    ap.add_argument("--warmup",   type=int,   default=50)
+    ap.add_argument("--seed",     type=int,   default=1337)
+    ap.add_argument("--out",      default="ckpt.pt")
+    ap.add_argument("--log_every",type=int,   default=100)
+    ap.add_argument("--ema_decay",type=float, default=0.997)
     ap.add_argument("--reencode", action="store_true",
                     help="Ignore train_ids.pt cache and re-encode corpus")
     args = ap.parse_args()
@@ -84,7 +92,7 @@ def main():
     text = open(args.data, encoding="utf-8").read()
     n_bytes = len(text.encode("utf-8"))
 
-    # --- BPE tokenizer (train once) ----------------------------------------
+    # --- BPE tokenizer (train once, then load) --------------------------------
     tok_path = os.path.join(base_dir, "bpe_tokenizer.json")
     if not os.path.exists(tok_path):
         print("--- Training BPE tokenizer (one-time) ---")
@@ -96,7 +104,7 @@ def main():
 
     tok = tokenizer_mod.load()
 
-    # --- lossless checks (dev full, train sample) --------------------------
+    # --- lossless checks ------------------------------------------------------
     dev_path = os.path.join(os.path.dirname(args.data), "dev_eval.txt")
     if os.path.exists(dev_path):
         dev_text = open(dev_path, encoding="utf-8").read()
@@ -109,18 +117,18 @@ def main():
         os.remove(ids_cache)
     ids = load_corpus_ids(text, tok, ids_cache)
 
-    bpe_tokens = len(ids)
+    bpe_tokens     = len(ids)
     bytes_per_token = n_bytes / bpe_tokens
     tokens_per_step = args.batch * Config.block_size
-    epoch_ratio = (args.steps * tokens_per_step) / bpe_tokens
-    wd = weight_decay_from_epoch_ratio(epoch_ratio)
+    epoch_ratio     = (args.steps * tokens_per_step) / bpe_tokens
+    wd              = weight_decay_from_epoch_ratio(epoch_ratio)
 
     print(f"corpus: {n_bytes:,} bytes -> {bpe_tokens:,} tokens "
           f"(vocab {tok.vocab_size}, {bytes_per_token:.2f} bytes/token)")
     print(f"  epoch_ratio={epoch_ratio:.2f}  (batch={args.batch}, "
           f"block={Config.block_size}) -> weight_decay={wd}")
 
-    # --- model -------------------------------------------------------------
+    # --- model ----------------------------------------------------------------
     cfg = Config()
     cfg.vocab_size = tok.vocab_size
     model = GPT(cfg).to(device)
@@ -135,12 +143,19 @@ def main():
         weight_decay=wd,
     )
 
+    # WSD schedule: warmup=50, stable until step 1600, then linear decay to 2000
+    stable_end = int(args.steps * 0.80)   # 80% = step 1600
+
+    # EMA shadow model — activated during the decay phase (step > stable_end)
+    ema_model  = copy.deepcopy(model)
+    ema_active = False
+
     model.train()
-    t0 = time.time()
+    t0     = time.time()
     losses = []
 
     for step in range(1, args.steps + 1):
-        lr = cosine_lr(step, args.steps, args.warmup, args.lr)
+        lr = wsd_lr(step, args.steps, args.warmup, stable_end, args.lr)
         for pg in opt.param_groups:
             pg["lr"] = lr
 
@@ -152,20 +167,31 @@ def main():
         opt.step()
         losses.append(loss.item())
 
+        # EMA update during decay phase
+        if step >= stable_end:
+            if not ema_active:
+                ema_model.load_state_dict(model.state_dict())
+                ema_active = True
+            with torch.no_grad():
+                for p_ema, p_model in zip(ema_model.parameters(), model.parameters()):
+                    p_ema.data.mul_(args.ema_decay).add_(p_model.data, alpha=1.0 - args.ema_decay)
+
         if step == 50:
-            ms = (time.time() - t0) / step * 1000
+            ms      = (time.time() - t0) / step * 1000
             eta_min = ms * args.steps / 60000
             print(f"  >> ETA full run: {eta_min:.1f} min  ({ms:.0f} ms/step)")
 
         if step % args.log_every == 0 or step == 1:
             recent = losses[-args.log_every:]
-            avg = sum(recent) / len(recent)
-            ms = (time.time() - t0) / step * 1000
+            avg    = sum(recent) / len(recent)
+            ms     = (time.time() - t0) / step * 1000
             print(f"step {step:5d}  loss {avg:.4f}  lr {lr:.6f}  ({ms:.0f} ms/step)")
 
+    # Save EMA weights if activated (better generalisation), else raw model
+    save_model = ema_model if ema_active else model
     torch.save(
         {
-            "model": model.state_dict(),
+            "model": save_model.state_dict(),
             "config": {
                 k: getattr(cfg, k)
                 for k in dir(cfg)
@@ -175,6 +201,7 @@ def main():
             "train_loss_curve": losses,
             "epoch_ratio": epoch_ratio,
             "weight_decay": wd,
+            "ema_used": ema_active,
         },
         args.out,
     )
