@@ -28,8 +28,9 @@
 
 Explore our comprehensive engineering whitepapers documenting the architectural evolution and systems mastery behind Micro-GPT 2000:
 
-* **[🔬 Architectural Ablation & Comparison (`ARCHITECTURE_COMPARISON.md`)](ARCHITECTURE_COMPARISON.md)**: A mathematical and empirical breakdown contrasting our simplified GeLU-only variant (`2.1489 BPB`) against the production SwiGLU + Depth Recurrence model (`2.0231 BPB`). Explains the exact gain from every upgraded primitive (`SwiGLU E=3`, `Depth Recurrence [0,1,2,3,2,3]`, `ResFormer residual gating`, `WSD + EMA`).
-* **[⚡ Engineering & Systems Optimization Log (`ENGINEERING_OPTIMIZATIONS.md`)](ENGINEERING_OPTIMIZATIONS.md)**: A deep systems engineering report detailing the 5 core runtime and memory optimizations that brought end-to-end execution from **45.0 minutes down to 7.2 minutes (`~217 ms/step`)**, featuring $O(1)$ BPE incremental updates, quadratic attention compute balancing, and cache-tied embeddings.
+* **[🔬 Architectural Ablation & Comparison (`docs/ARCHITECTURE_COMPARISON.md`)](docs/ARCHITECTURE_COMPARISON.md)**: A mathematical and empirical breakdown contrasting our simplified GeLU-only variant (`2.1489 BPB`) against the production SwiGLU + Depth Recurrence model (`2.0231 BPB`). Explains the exact gain from every upgraded primitive (`SwiGLU E=3`, `Depth Recurrence [0,1,2,3,2,3]`, `ResFormer residual gating`, `WSD + EMA`).
+* **[⚡ Engineering & Systems Optimization Log (`docs/ENGINEERING_OPTIMIZATIONS.md`)](docs/ENGINEERING_OPTIMIZATIONS.md)**: A deep systems engineering report detailing the 5 core runtime and memory optimizations that brought end-to-end execution from **45.0 minutes down to 7.2 minutes (`~217 ms/step`)**, featuring $O(1)$ BPE incremental updates, quadratic attention compute balancing, and cache-tied embeddings.
+* **[💻 Code & Architectural Structure Guide (`docs/CODE_AND_STRUCTURE.md`)](docs/CODE_AND_STRUCTURE.md)**: A complete code walkthrough detailing module topologies (`model.py`, `train.py`, `tokenizer.py`), class-by-class mathematical formulations, and step-by-step training execution mechanics (`WSD schedule + late-stage EMA`).
 
 ---
 
@@ -161,8 +162,10 @@ python train.py --data train_corpus.txt --steps 2000 --out ckpt.pt --log_every 1
 ├── evaluate.py             # Official evaluation scorecard & BPB calculation script
 ├── bpe_tokenizer.json      # Trained BPE vocabulary pair mappings
 ├── train_ids.pt            # Cached token IDs for rapid startup
-├── ARCHITECTURE_COMPARISON.md  # Scientific ablation: GeLU variant vs. Production SwiGLU model
-├── ENGINEERING_OPTIMIZATIONS.md # Systems mastery: 45 to 7.2 min runtime optimization breakdown
+├── docs/                   # Exhaustive engineering & architectural whitepapers
+│   ├── ARCHITECTURE_COMPARISON.md  # Scientific ablation: GeLU variant vs. Production SwiGLU model
+│   ├── ENGINEERING_OPTIMIZATIONS.md # Systems mastery: 45 to 7.2 min runtime optimization breakdown
+│   └── CODE_AND_STRUCTURE.md       # Deep-dive code architecture & step-by-step training loop manual
 ├── SUMMARY.html            # Interactive visual dashboard & comprehensive design audit
 ├── RUNLOG.md               # Detailed graded run log tracking hypotheses across Runs 0–4
 ├── NOTES.md                # Concise 10-sentence technical rationale
